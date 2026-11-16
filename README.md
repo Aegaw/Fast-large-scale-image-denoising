@@ -1,15 +1,15 @@
-# agf2 —— 自适应引导滤波去噪（adapt_guided2.m 的 C++ 加速版）
+# 自适应引导滤波去噪
 
-把 MATLAB 版 `adapt_guided2` 真实噪声去噪算法移植为 C++17 工程（MSVC + AVX2 + 多线程）。
-PSNR 与原实现持平（SIDD ~37.6 dB），单张 3968×2944 从 MATLAB 的秒级降到 **~166 ms**；
-半分辨率快速路径 **~62 ms**。
+
+单张 3968×2944 图像稳定速度约145 ms
+
 
 ---
 
-## 1. 最快的用法（cmd 进入 agf2，直接运行）
+## 1. 用法（cmd 进入所在路径，直接运行）
 
 ```cmd
-cd E:\cpp_agf2\agf2
+cd 所在路径
 bin\agf.exe
 ```
 
@@ -21,32 +21,15 @@ bin\agf.exe
 4. 去噪结果写到 **`out_images\`**（文件名沿用噪声图文件名）；
 5. 每张打印耗时与 PSNR，最后打印均值。
 
-输出示例：
-
-```
-config: run_config.ini
-  input  : E:\cpp_agf2\agf2\noisy_images  [目录: 批量]
-  output : E:\cpp_agf2\agf2\out_images
-  has_gt : true  gt: E:\cpp_agf2\agf2\truth_images
-  params : tiled  nt=8  tile=384x384 halo=16  thr=0.50
-
-  [  1] sidd_6001.png        3968x2944    207.2 ms  PSNR=43.808 dB
-  [  2] sidd_6002.png        3968x2944    168.6 ms  PSNR=43.355 dB
-  ...
-
-160 images: mean PSNR = 37.588 dB  (min 25.382 / max 44.645),  mean 165.6 ms/image
-total 26.50 s
-```
-
 ---
 
-## 2. 目录结构（全部在 `agf2\` 内）
+## 2. 目录结构
 
 ```
-agf2\
+\
 ├─ bin\agf.exe                已编译好的程序
-├─ noisy_images\              噪声图（160 张，按文件名排序）
-├─ truth_images\              真值图（160 张，按文件名排序，与上面逐张对应）
+├─ noisy_images\              噪声图（按文件名排序）
+├─ truth_images\              真值图（按文件名排序，与上面逐张对应）
 ├─ out_images\                去噪结果（运行后生成）
 ├─ run_config.ini             ★ 入口配置：读/写路径、是否有真值、去噪参数
 ├─ agf.cpp / agf.h            算法原语 + agf_denoise（全图）+ agf2_denoise_tiled（分块）
@@ -59,14 +42,14 @@ agf2\
 ```
 
 **对应规则**：`noisy_images` 与 `truth_images` 各自按**文件名升序**排序后，第 N 个噪声图配第 N 个真值图。
-只要两个文件夹里文件数量相同、排序后语义一致即可（本项目是 `sidd_6001.png` ↔ `asidd_6001.png`）。
+只要两个文件夹里文件数量相同、排序后语义一致即可。
 
 ---
 
 ## 3. 构建
 
 ```powershell
-cd E:\cpp_agf2\agf2
+cd 所在路径
 .\build.ps1 agf          # 需要 VS2022 的 vcvars64.bat
 ```
 
@@ -165,37 +148,7 @@ bin\agf.exe --difftiled --in x.png    # 分块 vs 全图对拍
 
 ---
 
-## 7. 实测（Ryzen 5 5600X，SIDD 3968×2944）
-
-| 配置 | 口径 | PSNR | 单张 |
-|---|---|---|---|
-| 全图平面式 | 20 张 | 38.201 dB | 192 ms |
-| **分块 `--tiled` tw/th=384 halo=16 nt=8** | 20 张 | **38.199 dB** | **170 ms** |
-| **同上** | **160 张（本目录默认）** | **37.588 dB** | **166 ms** |
-| **半分辨率 `--half --tiled` tw=256** | 20 张 | **37.109 dB** | **62 ms** |
-| （MATLAB 原实现） | — | 37.590 dB | 秒级 |
-
-- 分块版与全图版**不逐位一致**（硬 mask 对浮点求和顺序敏感），但 PSNR 对真值一致。
-- 半分辨率掉约 1.1 dB，换来 2.7× 加速。
-
----
-
-## 8. 加速点（为什么能快 10 倍）
-
-1. **融合 box 滤波**：引导滤波的 6 条 box 流（`box(I)`、`box(I²)`、`box(p)`、`box(p·I)`、`box(a)`、`box(b)`）
-   融合成单遍「水平前缀和 + 垂直滑窗」，每个平面只读写一次，全程 AVX2 向量化。
-2. **u8 中转**：中间平面（`e1`/`up1`/`m2up`/`ec1`/`↑d2`）用 8bit + 缩放存储，DRAM 流量降到 1/4。
-3. **2D 分块 + halo**：tile 内跑完整条流水线，中间量驻留 L3，避免"写出去再读回来"。
-4. **半分辨率快速路径**：2×2 box 降采样（SIMD 16bit 精确求和）→ 半分辨率去噪 → 双线性放大时直出 u8。
-5. **多线程分块并行**：8 线程恰好打满 DRAM 带宽（再加线程无收益，说明是内存带宽受限而非算力受限）。
-6. **scratch 缓冲复用**：`thread_local` 复用百 MB 级中间缓冲，省掉每张图重复分配的首触开销。
-
-该算法算术强度只有 ~1–2 FLOP/byte，是典型的内存带宽受限问题，因此优化重点是
-「减少数据搬运」（u8、分块、融合）而不是「减少计算」。
-
----
-
-## 9. 说明
+## 7. 说明
 
 - `W`、`H` 必须是 **128 的倍数**（算法按 8×8 块与 2× 金字塔对齐）。
 - 批量时若两个文件夹张数不同，按较小值配对并给出提示。
